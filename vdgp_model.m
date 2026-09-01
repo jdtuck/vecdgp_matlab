@@ -35,8 +35,8 @@ classdef vdgp_model
                 idxSamples = 1:options.B;
             end
 
-            pred = dgp_predict(obj.model, x_new);
-            pred = pred(:, idxSamples)';
+            out = dgp_predict(obj.model, x_new, 'nsamp', options.B);
+            pred = out.f(:, idxSamples)';
 
         end
     end
