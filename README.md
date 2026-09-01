@@ -1,3 +1,5 @@
+[![Pipeline Status](https://github.com/jdtuck/vecdgp_matlab/actions/workflows/matlab.yml/badge.svg)](https://github.com/jdtuck/vecdgp_matlab/actions/workflows/matlab.yml)
+
 # vecchia_dgp — Vecchia-approximated deep Gaussian processes in MATLAB
 
 A from-scratch MATLAB implementation of
