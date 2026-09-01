@@ -7,19 +7,10 @@ classdef vdgp_model
     end
 
     methods
-        function obj = vdgp_model(x, y, nmcmc, burn, thin, m, nugget)
+        function obj = vdgp_model(model)
             arguments
-                x
-                y
-                nmcmc = 10000
-                burn  = 5000
-                thin = 2
-                m = 25
-                nugget = []
+                model
             end
-            model = fit_two_layer(x, y, 'nmcmc', nmcmc, 'm', m, ...
-                'true_g', nugget, 'verb', 500);
-            model = dgp_trim(model, burn, thin);
             obj.model = model;
         end
 
