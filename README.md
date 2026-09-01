@@ -33,6 +33,9 @@ pred = dgp_predict(fit, xx);            % pointwise posterior predictive
 
 plot(xx, pred.mean); hold on
 plot(xx, pred.mean + 1.96*pred.sd, ':'), plot(xx, pred.mean - 1.96*pred.sd, ':')
+
+pred = dgp_predict(fit, xx, 'nsamp', 100);   % joint posterior sample paths
+plot(xx, pred.f)
 ```
 
 which is the MATLAB transcription of the deepgp example
@@ -249,6 +252,49 @@ Predictive variances include the nugget by default (as in deepgp); set
 `'pred_noise', false` in the options for the noise-free latent-function
 predictive.
 
+### Sample paths
+
+```matlab
+pred = dgp_predict(fit, xx, 'nsamp', 100);   % pred.f is n_new-by-100
+plot(xx, pred.f)
+```
+
+Each column of `pred.f` is a **joint** draw at all test locations from
+`N(mu_t, Sigma_t)` for one retained MCMC iteration — not a draw from the
+summarised `N(mu, Sigma)`, which would flatten a possibly multi-modal mixture
+into a single Gaussian. Draws are spread evenly over the retained iterations
+and `pred.f_iter` records which iteration produced each column, so `pred.f` is
+a valid sample from the mixture: its sample mean and covariance converge to
+`pred.mean` and `pred.Sigma`, which is what the last two checks in `test_vdgp`
+verify.
+
+Under Vecchia a draw never touches a covariance matrix. Since
+`Cov = tau2 · U22⁻ᵀU22⁻¹`,
+
+```
+f = mu + sqrt(tau2) * (U22' \ z) ,     z ~ N(0, I)
+```
+
+is one sparse triangular solve for the whole batch — O(n_new · m). Sample
+paths are therefore affordable at test sizes where `'lite', false` would run
+out of memory, and asking for them does not force the full covariance.
+
+By default the latent layers are still propagated by their kriging means, as
+deepgp does, so the draws carry the outer layer's uncertainty and the MCMC
+spread of the warping, but not the warping's own predictive uncertainty at new
+locations. `'sample_latent', true` draws each hidden node from its own
+predictive for every path instead — more fully Bayesian, wider paths (about
+10% on the 1-D example), and `nsamp` times more work since the warping changes
+per path.
+
+Note `dgp_predict`'s old `'samples'` flag (per-iteration `mu_t`/`s2_t`) is now
+called `'per_draw'`, freeing the sampling vocabulary for `'nsamp'`.
+
+The right-hand panel of `demos/demo_1d.png` shows why the paths are worth
+having: they interpolate the data and fan out only over the oscillatory
+region, collapsing to a single line on the linear stretch. A symmetric
+mean ± 2 sd band summarises that but cannot display it.
+
 ---
 
 ## API map: deepgp (R) → this package
@@ -261,6 +307,7 @@ predictive.
 | `trim(fit, burn, thin)` | `dgp_trim(fit, burn, thin)` |
 | `continue(fit, n, re_approx = TRUE)` | `dgp_continue(fit, n, true)` |
 | `predict(fit, xx, lite = TRUE)` | `dgp_predict(fit, xx, 'lite', true)` |
+| draw paths from `Sigma` by hand | `dgp_predict(fit, xx, 'nsamp', K)` → `pred.f` |
 | `settings = list(l =, u =, alpha =, beta =)` | `vdgp_options('l', …, 'u', …, 'alpha', …, 'beta', …)` |
 | `cov = "matern"`, `v = 2.5` | `'cov', 'matern'`, `'v', 2.5` |
 | `true_g` | `'true_g'` |
@@ -356,11 +403,14 @@ PASS  profiled outer log-likelihood and tau2               tau2 135.886572 vs 13
 PASS  rand_mvn empirical covariance                        max err 0.018
 PASS  lite prediction, m = n, matches exact                mean 4.86e-12, s2 3.06e-14
 PASS  joint prediction, full m, matches exact              mean 1.75e-13, Sigma 1.47e-15
+PASS  joint draws match the joint covariance               mean 0.008 sd, cov 0.007 rel
 PASS  MH kernel recovers the Gamma prior                   mean 1.544 (1.538), sd 1.275 (1.256)
 PASS  ESS leaves the MVN prior invariant                   mean 0.006 (0), sd 1.007 (1)
 PASS  ordered nearest-neighbour sets are exact
 PASS  maxmin ordering is a valid permutation
-PASS  two-layer Vecchia DGP on the deepgp example          RMSE 0.0247, coverage 0.99
+PASS  two-layer Vecchia DGP on the deepgp example          RMSE 0.0246, coverage 0.99
+PASS  sample paths reproduce the predictive mixture        mean 0.019 sd, cov 0.029 rel
+PASS  sample paths are spread over all retained draws      300 iterations used
 ```
 
 The two distributional checks are the interesting ones. With `n = 1` there are

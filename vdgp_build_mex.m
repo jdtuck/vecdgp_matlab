@@ -26,7 +26,7 @@ if ~force && exist('vdgp_U_entries_mex', 'file') == 3
 end
 
 old = cd(here);
-cleanupObj = onCleanup(@() cd(old));
+cleanupObj = onCleanup(@() cd(old)); %#ok<NASGU>  restores cwd on any exit
 
 isOctave = exist('OCTAVE_VERSION', 'builtin') == 5;
 

@@ -1,7 +1,7 @@
-function out = vdgp_krig(y, X, Xnew, theta, g, tau2, opts, mode, m, NN)
+function out = vdgp_krig(y, X, Xnew, theta, g, tau2, opts, mode, m, NN, nsamp)
 %VDGP_KRIG  Gaussian process prediction, with or without Vecchia.
 %
-%   OUT = VDGP_KRIG(Y, X, XNEW, THETA, G, TAU2, OPTS, MODE, M, NN)
+%   OUT = VDGP_KRIG(Y, X, XNEW, THETA, G, TAU2, OPTS, MODE, M, NN, NSAMP)
 %
 %   MODE
 %     'mean'   posterior mean only (used for the latent layers, which are
@@ -9,6 +9,14 @@ function out = vdgp_krig(y, X, Xnew, theta, g, tau2, opts, mode, m, NN)
 %              as in deepgp)
 %     'lite'   posterior mean and pointwise variance
 %     'joint'  posterior mean and full n_new-by-n_new covariance
+%     'sample' posterior mean and NSAMP joint draws, WITHOUT ever forming the
+%              covariance.  Under Vecchia a draw is
+%
+%                  f = mu + sqrt(tau2) * U22^{-T} z ,   z ~ N(0, I)
+%
+%              because Cov = tau2 * U22^{-T} U22^{-1}; that is one sparse
+%              triangular solve, O(n_new m), per batch of draws.  'joint' also
+%              returns draws when NSAMP > 0.
 %
 %   With OPTS.vecchia = true the prediction is the Vecchia predictor of
 %   Sauer, Cooper & Gramacy (2023):
@@ -32,17 +40,20 @@ function out = vdgp_krig(y, X, Xnew, theta, g, tau2, opts, mode, m, NN)
 %   'mean'/'lite' modes so that repeated calls inside the MCMC loop -- where X
 %   changes but the neighbour structure is reused -- do not repeat the search.
 
-if nargin < 8 || isempty(mode), mode = 'lite'; end
-if nargin < 9 || isempty(m),    m = opts.m;    end
+if nargin < 8  || isempty(mode), mode = 'lite'; end
+if nargin < 9  || isempty(m),    m = opts.m;    end
 if nargin < 10, NN = []; end
+if nargin < 11 || isempty(nsamp), nsamp = 0; end
 
 y = y(:);
 n    = size(X, 1);
 nnew = size(Xnew, 1);
 v    = opts.v;
 ct   = opts.cov;
-joint = strcmpi(mode, 'joint');
-want_s2 = ~strcmpi(mode, 'mean');
+sampling = strcmpi(mode, 'sample');
+joint   = strcmpi(mode, 'joint') || (sampling && nsamp > 0);
+want_s2 = ~strcmpi(mode, 'mean') && ~sampling;
+if sampling && nsamp < 1, nsamp = 1; end
 
 % nugget carried by the PREDICTIVE locations
 if isfield(opts, 'pred_noise') && ~opts.pred_noise
@@ -63,8 +74,15 @@ if ~opts.vecchia
     if joint
         Kn = vdgp_cov(Xnew, [], theta, gp, 1, v, ct);
         S  = tau2 * (Kn - Lk.' * Lk);
-        out.Sigma = (S + S.') / 2;
-        out.s2 = diag(out.Sigma);
+        S  = (S + S.') / 2;
+        if ~sampling
+            out.Sigma = S;
+            out.s2 = diag(S);
+        end
+        if nsamp > 0
+            Lc = local_safe_chol(S);
+            out.draws = mu + Lc * randn(nnew, nsamp);
+        end
     elseif want_s2
         out.s2 = tau2 * (1 + gp - sum(Lk.^2, 1).');
     end
@@ -82,18 +100,29 @@ if joint
     U12 = U(1:n, n+1:end);
     U22 = U(n+1:end, n+1:end);
 
-    rhs   = U12.' * y;
-    muo   = -(U22.' \ rhs);
-    M     = U22.' \ speye(nnew);          % lower triangular, dense-ish
-    S     = tau2 * (M * M.');
-    S     = full((S + S.') / 2);
+    rhs = U12.' * y;
+    muo = -(U22.' \ rhs);
 
     mu = zeros(nnew, 1);  mu(ordn) = muo;
-    Sg = zeros(nnew);     Sg(ordn, ordn) = S;
+    out.mean = mu;
 
-    out.mean  = mu;
-    out.Sigma = Sg;
-    out.s2    = diag(Sg);
+    if nsamp > 0
+        % Cov = tau2 * U22^{-T} U22^{-1}, so sqrt(tau2) * (U22' \ z) is a draw
+        % from the centred joint predictive -- no covariance is ever formed.
+        Do = sqrt(tau2) * (U22.' \ randn(nnew, nsamp));
+        D = zeros(nnew, nsamp);
+        D(ordn, :) = full(Do);
+        out.draws = mu + D;
+    end
+
+    if ~sampling
+        M  = U22.' \ speye(nnew);         % lower triangular
+        S  = tau2 * (M * M.');
+        S  = full((S + S.') / 2);
+        Sg = zeros(nnew);  Sg(ordn, ordn) = S;
+        out.Sigma = Sg;
+        out.s2    = diag(Sg);
+    end
     return
 end
 
@@ -141,6 +170,25 @@ out.mean = mu;
 if want_s2
     out.s2 = max(s2, 0);
 end
+end
+
+% -------------------------------------------------------------------------
+function L = local_safe_chol(S)
+% Lower Cholesky factor of a predictive covariance, with jitter if the matrix
+% is only numerically semi-definite (common when test points nearly coincide).
+n = size(S, 1);
+sc = mean(abs(diag(S)));
+if sc == 0, sc = 1; end
+jit = 0;
+for a = 0:6
+    if jit > 0, S = S + jit * eye(n); end
+    [L, p] = chol(S, 'lower');
+    if p == 0, return; end
+    jit = max(jit * 10, 1e-12 * sc);
+end
+% last resort: symmetric square root with the negative spectrum clipped
+[V, D] = eig((S + S.') / 2);
+L = V * diag(sqrt(max(diag(D), 0)));
 end
 
 % -------------------------------------------------------------------------

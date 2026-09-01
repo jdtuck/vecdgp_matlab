@@ -5,11 +5,17 @@ function pred = dgp_predict(fit, x_new, varargin)
 %   PRED = DGP_PREDICT(FIT, X_NEW, 'name', value, ...)
 %
 %   Options
-%     'lite'     true (default) -> pointwise variances only
-%                false          -> full predictive covariance (memory n_new^2)
-%     'm'        conditioning-set size for prediction (default: the fit's m)
-%     'samples'  return the per-iteration means/variances (default false)
-%     'cores'    >0 requests parfor over MCMC draws (default fit.opts.cores)
+%     'lite'      true (default) -> pointwise variances only
+%                 false          -> full predictive covariance (memory n_new^2)
+%     'm'         conditioning-set size for prediction (default: the fit's m)
+%     'nsamp'     number of joint posterior predictive SAMPLE PATHS to return
+%                 (default 0).  See below.
+%     'sample_latent'  when drawing sample paths, also draw the latent layers
+%                 from their own predictive instead of propagating their
+%                 kriging means (default false, which matches deepgp)
+%     'per_draw'  return the per-iteration means/variances mu_t, s2_t
+%                 (default false)
+%     'cores'     >0 requests parfor over MCMC draws (default fit.opts.cores)
 %
 %   The posterior predictive is a mixture over the retained MCMC draws.  For
 %   each draw t the latent layers are propagated forward by their kriging
@@ -19,16 +25,36 @@ function pred = dgp_predict(fit, x_new, varargin)
 %        mu  = mean_t mu_t
 %        s2  = mean_t ( s2_t + mu_t^2 ) - mu^2
 %
-%   PRED has fields .mean, .s2, .sd, .x_new, and (when 'lite' is false)
-%   .Sigma.  Everything is returned on the ORIGINAL y scale.
+%   SAMPLE PATHS.  With 'nsamp', K the function also returns K draws from the
+%   posterior predictive, in PRED.f (n_new-by-K).  Each draw is a JOINT draw
+%   from N(mu_t, Sigma_t) for one retained MCMC iteration t -- not a draw from
+%   the summarised N(mu, Sigma), which would collapse a possibly multi-modal
+%   mixture to a single Gaussian.  Requested draws are spread evenly over the
+%   retained iterations, and PRED.f_iter records which iteration produced each
+%   column, so PRED.f is a valid sample from the mixture and its sample mean
+%   and covariance converge to PRED.mean and PRED.Sigma.
+%
+%   Under the Vecchia approximation a joint draw costs one sparse triangular
+%   solve, sqrt(tau2) * (U22' \ z), and no n_new-by-n_new covariance is ever
+%   formed -- so sample paths are affordable at test sizes where 'lite', false
+%   would not be.
+%
+%   Draws include the nugget unless OPTS.pred_noise is false, in which case
+%   they are draws of the latent function.
+%
+%   PRED has fields .mean, .s2, .sd, .x_new, plus .Sigma (when 'lite' is
+%   false), .f and .f_iter (when 'nsamp' > 0), and .mu_t/.s2_t (when
+%   'per_draw' is true).  Everything is on the ORIGINAL y scale.
 %
 %   See also FIT_TWO_LAYER, DGP_TRIM.
 
-p = local_parse(varargin, struct('lite', true, 'm', [], 'samples', false, ...
+p = local_parse(varargin, struct('lite', true, 'm', [], 'per_draw', false, ...
+                                 'nsamp', 0, 'sample_latent', false, ...
                                  'cores', []));
 opts = fit.opts;
 if isempty(p.m), p.m = opts.m; end
 if isempty(p.cores), p.cores = opts.cores; end
+p.nsamp = max(0, round(p.nsamp));
 
 if isvector(x_new), x_new = x_new(:); end
 if fit.scaling.scaled
@@ -45,6 +71,16 @@ if ~p.lite
     Sig = zeros(nnew, nnew);
 end
 
+% Spread the requested sample paths evenly over the retained iterations, so
+% that PRED.f is a draw from the mixture rather than from one part of it.
+if p.nsamp > 0
+    t_assign = 1 + floor((0:(p.nsamp - 1)) * T / p.nsamp);
+    ndraw_t  = accumarray(t_assign(:), 1, [T, 1]);
+else
+    ndraw_t  = zeros(T, 1);
+end
+Fc = cell(T, 1);
+
 % neighbour structure for the inner layer never changes (x is fixed)
 NNx = [];
 if opts.vecchia
@@ -56,16 +92,18 @@ end
 % p.cores = 0 MATLAB runs it serially; Octave ignores the worker count.
 if p.lite
     parfor (t = 1:T, p.cores)
-        [mt, st] = local_one_draw(fit, xs_new, t, opts, p, NNx, true);
+        [mt, st, ~, dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, true, ndraw_t(t));
         mu_t(:, t) = mt;
         s2_t(:, t) = st;
+        Fc{t} = dr;
     end
 else
     parfor (t = 1:T, p.cores)
-        [mt, st, Sg] = local_one_draw(fit, xs_new, t, opts, p, NNx, false);
+        [mt, st, Sg, dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, false, ndraw_t(t));
         mu_t(:, t) = mt;
         s2_t(:, t) = st;
         Sig = Sig + (Sg + mt * mt.') / T;
+        Fc{t} = dr;
     end
 end
 
@@ -85,18 +123,71 @@ if ~p.lite
     Sig = (Sig + Sig.') / 2;
     pred.Sigma = Sig * ysd^2;
 end
-if p.samples
+if p.per_draw
     pred.mu_t = mu_t * ysd + ym;
     pred.s2_t = s2_t * ysd^2;
+end
+if p.nsamp > 0
+    F = [Fc{:}];
+    pred.f = F * ysd + ym;
+    f_iter = zeros(1, 0);
+    for t = 1:T
+        f_iter = [f_iter, repmat(t, 1, ndraw_t(t))]; %#ok<AGROW>
+    end
+    pred.f_iter = f_iter;
 end
 end
 
 % -------------------------------------------------------------------------
-function [mu, s2, Sg] = local_one_draw(fit, xs_new, t, opts, p, NNx, lite)
-% Propagate one posterior draw of the latent layers forward and condition the
-% outer layer on it.
-nnew = size(xs_new, 1);
+function [mu, s2, Sg, Dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, lite, ndraw)
+% Propagate one posterior draw of the latent layers forward, condition the
+% outer layer on it, and optionally take NDRAW joint sample paths.
 Sg = [];
+Dr = [];
+nnew = size(xs_new, 1);
+
+% latent layers propagated by their kriging means (as deepgp does); this is
+% what the reported mean and variance are always based on
+[Xin, Xout, NNo] = local_forward(fit, xs_new, t, opts, p, NNx, false);
+
+want_here = (ndraw > 0) && ~p.sample_latent;
+
+if lite
+    o = vdgp_krig(fit.y, Xin, Xout, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
+                  opts, 'lite', p.m, NNo);
+    mu = o.mean; s2 = o.s2;
+    if want_here
+        os = vdgp_krig(fit.y, Xin, Xout, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
+                       opts, 'sample', p.m, [], ndraw);
+        Dr = os.draws;
+    end
+else
+    ns = 0; if want_here, ns = ndraw; end
+    o = vdgp_krig(fit.y, Xin, Xout, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
+                  opts, 'joint', p.m, [], ns);
+    mu = o.mean; s2 = o.s2; Sg = o.Sigma;
+    if want_here, Dr = o.draws; end
+end
+
+% fully-Bayesian variant: redraw the warping for every sample path, so the
+% draws carry the latent layers' own predictive uncertainty too
+if (ndraw > 0) && p.sample_latent
+    Dr = zeros(nnew, ndraw);
+    for s = 1:ndraw
+        [Xin2, Xout2] = local_forward(fit, xs_new, t, opts, p, NNx, true);
+        os = vdgp_krig(fit.y, Xin2, Xout2, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
+                       opts, 'sample', p.m, [], 1);
+        Dr(:, s) = os.draws;
+    end
+end
+end
+
+% -------------------------------------------------------------------------
+function [Xin, Xout, NNo] = local_forward(fit, xs_new, t, opts, p, NNx, draw)
+% Push the test locations through the latent layers of MCMC draw t.  DRAW
+% false uses each layer's kriging mean; DRAW true takes a joint draw from each
+% layer's own predictive distribution.
+nnew = size(xs_new, 1);
 
 switch fit.layers
     case 1
@@ -105,9 +196,8 @@ switch fit.layers
         wt = fit.w(:, :, t);
         wn = zeros(nnew, size(wt, 2));
         for k = 1:size(wt, 2)
-            o = vdgp_krig(wt(:, k), fit.x, xs_new, fit.theta_w(t, k), ...
-                          opts.eps, 1, opts, 'mean', p.m, NNx);
-            wn(:, k) = o.mean;
+            wn(:, k) = local_layer(wt(:, k), fit.x, xs_new, fit.theta_w(t, k), ...
+                                   NNx, opts, p, draw);
         end
         Xin = wt; Xout = wn; NNo = [];
     case 3
@@ -115,29 +205,29 @@ switch fit.layers
         wt = fit.w(:, :, t);
         zn = zeros(nnew, size(zt, 2));
         for k = 1:size(zt, 2)
-            o = vdgp_krig(zt(:, k), fit.x, xs_new, fit.theta_z(t, k), ...
-                          opts.eps, 1, opts, 'mean', p.m, NNx);
-            zn(:, k) = o.mean;
+            zn(:, k) = local_layer(zt(:, k), fit.x, xs_new, fit.theta_z(t, k), ...
+                                   NNx, opts, p, draw);
         end
         wn = zeros(nnew, size(wt, 2));
         for k = 1:size(wt, 2)
-            o = vdgp_krig(wt(:, k), zt, zn, fit.theta_w(t, k), ...
-                          opts.eps, 1, opts, 'mean', p.m);
-            wn(:, k) = o.mean;
+            wn(:, k) = local_layer(wt(:, k), zt, zn, fit.theta_w(t, k), ...
+                                   [], opts, p, draw);
         end
         Xin = wt; Xout = wn; NNo = [];
     otherwise
         error('dgp_predict:layers', 'Unsupported number of layers.');
 end
+end
 
-if lite
-    o = vdgp_krig(fit.y, Xin, Xout, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
-                  opts, 'lite', p.m, NNo);
-    mu = o.mean; s2 = o.s2;
+% -------------------------------------------------------------------------
+function vals = local_layer(yy, Xtr, Xte, th, NNuse, opts, p, draw)
+% One hidden node pushed forward: kriging mean, or a joint draw.
+if draw
+    o = vdgp_krig(yy, Xtr, Xte, th, opts.eps, 1, opts, 'sample', p.m, NNuse, 1);
+    vals = o.draws;
 else
-    o = vdgp_krig(fit.y, Xin, Xout, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
-                  opts, 'joint', p.m);
-    mu = o.mean; s2 = o.s2; Sg = o.Sigma;
+    o = vdgp_krig(yy, Xtr, Xte, th, opts.eps, 1, opts, 'mean', p.m, NNuse);
+    vals = o.mean;
 end
 end
 
