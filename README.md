@@ -123,33 +123,6 @@ The batched-array build is the fallback. If you have a C compiler, run
 vdgp_build_mex          % compiles the C kernels, with OpenMP if available
 ```
 
-It probes the available toolchains, keeps the first that actually yields more
-than one thread, and reports what it picked. `vdgp_build_mex(true, MODE)`
-forces one — `'mac'`, `'gcc'`, `'msvc'` or `'serial'`. A machine with no
-working compiler is not fatal: every kernel has a pure-MATLAB fallback.
-
-**macOS.** The clang bundled with Xcode rejects `-fopenmp`, because Apple does
-not ship the OpenMP runtime — a plain build reports
-`unsupported option '-fopenmp'` and falls back to a single-threaded build.
-Install the runtime once:
-
-```
-brew install libomp
-```
-
-then rerun `vdgp_build_mex(true)`; it finds Homebrew's (or MacPorts') headers
-automatically. It compiles against libomp's headers but links against the
-`libiomp5` that ships **inside MATLAB**, so only one OpenMP runtime is ever
-loaded — that avoids the `OMP: Error #15 ... libiomp5.dylib already
-initialized` abort that linking Homebrew's libomp alongside MATLAB's can
-otherwise cause. If MATLAB's runtime cannot be found it links libomp directly
-and sets `KMP_DUPLICATE_LIB_OK` as a safety net.
-
-A single-threaded build is not a failure mode worth worrying about: the serial
-MEX is already ~10x faster than the pure-MATLAB path, and OpenMP multiplies
-that by roughly the core count on top. `vdgp_profile` reports the live thread
-count either way.
-
 once. Three kernels are built — `vdgp_logl_mex` (the likelihood, which is
 what a Gibbs sweep spends nearly all its time in), `vdgp_U_entries_mex` (the
 `U` factor, for prior draws and joint prediction) and `vdgp_krig_mex`
@@ -402,7 +375,6 @@ vdgp_build_mex.m           compile the optional MEX accelerations
 mex/vdgp_logl_mex.c        OpenMP C kernel: the likelihood (the hot path)
 mex/vdgp_U_entries_mex.c   OpenMP C kernel: the U factor
 mex/vdgp_krig_mex.c        OpenMP C kernel: pointwise prediction
-mex/vdgp_omp_threads.c     reports the thread count; also the build probe
 
 fit_one_layer.m            MCMC for a shallow GP
 fit_two_layer.m            MCMC for a two-layer DGP
