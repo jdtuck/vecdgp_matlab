@@ -2,3 +2,10 @@
 vdgp_U_entries_mex.mexmaca64
 
 *.mexmaca64
+*.mexa64
+*.mexw64
+*.mexmaci64
+*.mexw32
+*.mex
+*.o
+octave-workspace

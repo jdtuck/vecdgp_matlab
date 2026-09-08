@@ -22,15 +22,31 @@ have = struct('U',    exist('vdgp_U_entries_mex', 'file') == 3, ...
               'krig', exist('vdgp_krig_mex', 'file')     == 3, ...
               'knn',  exist('knnsearch', 'file') == 2 || exist('knnsearch', 'builtin') == 5, ...
               'mink', exist('mink', 'file') == 2 || exist('mink', 'builtin') == 5);
+nthreads = NaN;
+if exist('vdgp_omp_threads', 'file') == 3
+    try, nthreads = vdgp_omp_threads(); catch, nthreads = NaN; end
+end
 
 fprintf('\n=== vdgp_profile:  n = %d, d = %d, m = %d, D = %d ===\n\n', n, d, m, D);
 fprintf('  MEX vdgp_logl_mex      : %s\n', local_yn(have.logl));
 fprintf('  MEX vdgp_U_entries_mex : %s\n', local_yn(have.U));
 fprintf('  MEX vdgp_krig_mex      : %s\n', local_yn(have.krig));
 fprintf('  knnsearch (Stats tbx)  : %s\n', local_yn(have.knn));
+if isnan(nthreads)
+    fprintf('  OpenMP threads         : unknown\n');
+elseif nthreads > 1
+    fprintf('  OpenMP threads         : %d\n', nthreads);
+else
+    fprintf('  OpenMP threads         : 1  (kernels are single-threaded)\n');
+end
 if ~(have.logl && have.U && have.krig)
     fprintf('\n  >> Run vdgp_build_mex to compile the C kernels. Expect roughly a\n');
     fprintf('     10x speed-up on everything below.\n');
+elseif ~isnan(nthreads) && nthreads <= 1
+    fprintf('\n  >> The kernels are running on one core.\n');
+    if ismac
+        fprintf('     On macOS:  brew install libomp   then vdgp_build_mex(true).\n');
+    end
 end
 
 X = rand(n, d);
@@ -76,7 +92,7 @@ fprintf('   4. prediction: dgp_predict(..., ''cores'', N) parallelises over MCMC
 fprintf('      draws, and dgp_trim(fit, burn, thin) with thin > 1 cuts the draw\n');
 fprintf('      count directly\n\n');
 
-info = struct('have', have, 't_setup', t_nn, 't_logl', t_ll, 't_randmvn', t_rm, ...
+info = struct('have', have, 'threads', nthreads, 't_setup', t_nn, 't_logl', t_ll, 't_randmvn', t_rm, ...
               't_krig', t_kr, 't_sweep', t_sweep, 'n', n, 'd', d, 'm', m, 'D', D);
 end
 
