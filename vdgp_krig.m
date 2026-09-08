@@ -1,4 +1,4 @@
-function out = vdgp_krig(y, X, Xnew, theta, g, tau2, opts, mode, m, NN, nsamp)
+function out = vdgp_krig(y, X, Xnew, theta, g, tau2, opts, mode, m, NN, nsamp, Ajoint)
 %VDGP_KRIG  Gaussian process prediction, with or without Vecchia.
 %
 %   OUT = VDGP_KRIG(Y, X, XNEW, THETA, G, TAU2, OPTS, MODE, M, NN, NSAMP)
@@ -40,10 +40,16 @@ function out = vdgp_krig(y, X, Xnew, theta, g, tau2, opts, mode, m, NN, nsamp)
 %   'mean'/'lite' modes so that repeated calls inside the MCMC loop -- where X
 %   changes but the neighbour structure is reused -- do not repeat the search.
 
+persistent HAVE_KRIG_MEX
+if isempty(HAVE_KRIG_MEX)
+    HAVE_KRIG_MEX = (exist('vdgp_krig_mex', 'file') == 3);
+end
+
 if nargin < 8  || isempty(mode), mode = 'lite'; end
 if nargin < 9  || isempty(m),    m = opts.m;    end
 if nargin < 10, NN = []; end
 if nargin < 11 || isempty(nsamp), nsamp = 0; end
+if nargin < 12, Ajoint = []; end
 
 y = y(:);
 n    = size(X, 1);
@@ -91,9 +97,15 @@ end
 
 % ---------------- Vecchia ----------------------------------------------
 if joint
-    ordn = randperm(nnew);
-    Xall = [X; Xnew(ordn, :)];
-    A    = vdgp_create_approx(Xall, m, 'none', true);
+    if isempty(Ajoint)
+        ordn = randperm(nnew);
+        A    = vdgp_create_approx([X; Xnew(ordn, :)], m, 'none', true);
+    else
+        % Reuse an ordering and conditioning sets built once by the caller;
+        % only the coordinates change from one MCMC draw to the next.
+        ordn = Ajoint.ordn;
+        A    = vdgp_update_approx(Ajoint.A, [X; Xnew(ordn, :)]);
+    end
     gv   = [repmat(g, n, 1); repmat(max(gp, opts.eps), nnew, 1)];
     U    = vdgp_create_U(A, theta, gv, v, ct);
 
@@ -131,6 +143,19 @@ if isempty(NN)
     NN = vdgp_knn(X, Xnew, m);
 end
 k = size(NN, 2);
+
+% ---------------- optional MEX fast path ---------------------------------
+if HAVE_KRIG_MEX
+    dd = size(X, 2);
+    if isscalar(theta), th = repmat(theta, 1, dd); else, th = reshape(theta, 1, []); end
+    if strcmpi(ct, 'exp2'), vc = 999; else, vc = v; end
+    [mu, qfv] = vdgp_krig_mex(X, Xnew, NN, y, th, g, vc, double(want_s2));
+    out.mean = mu;
+    if want_s2
+        out.s2 = max(tau2 * (1 + gp - qfv), 0);
+    end
+    return
+end
 
 mu = zeros(nnew, 1);
 if want_s2, s2 = zeros(nnew, 1); end

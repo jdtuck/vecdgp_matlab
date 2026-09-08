@@ -15,7 +15,18 @@ function pred = dgp_predict(fit, x_new, varargin)
 %                 kriging means (default false, which matches deepgp)
 %     'per_draw'  return the per-iteration means/variances mu_t, s2_t
 %                 (default false)
-%     'cores'     >0 requests parfor over MCMC draws (default fit.opts.cores)
+%     'nn_warped' false (default): the conditioning sets for the test points
+%                 are found ONCE in x space and reused for every MCMC draw --
+%                 the same choice the sampler makes, where the ordering and
+%                 neighbour sets are built from x and held fixed while the
+%                 latent layers move (Section 4 of the paper found updating
+%                 them in warped space gives only marginal gains).
+%                 true: redo the neighbour search in the warped space of every
+%                 draw.  Costs roughly 20x more and rarely changes anything.
+%     'cores'     >0 requests parfor over MCMC draws (default fit.opts.cores).
+%                 With the Parallel Computing Toolbox this is close to linear
+%                 in the number of workers; it is the main lever once the
+%                 neighbour search is out of the inner loop.
 %
 %   The posterior predictive is a mixture over the retained MCMC draws.  For
 %   each draw t the latent layers are propagated forward by their kriging
@@ -50,7 +61,7 @@ function pred = dgp_predict(fit, x_new, varargin)
 
 p = local_parse(varargin, struct('lite', true, 'm', [], 'per_draw', false, ...
                                  'nsamp', 0, 'sample_latent', false, ...
-                                 'cores', []));
+                                 'nn_warped', false, 'cores', []));
 opts = fit.opts;
 if isempty(p.m), p.m = opts.m; end
 if isempty(p.cores), p.cores = opts.cores; end
@@ -81,10 +92,21 @@ else
 end
 Fc = cell(T, 1);
 
-% neighbour structure for the inner layer never changes (x is fixed)
+% Neighbour structure for the latent layers: x is fixed, so this is computed
+% once and reused for every MCMC draw (see 'nn_warped').
 NNx = [];
 if opts.vecchia
     NNx = vdgp_knn(fit.x, xs_new, min(p.m, fit.n));
+end
+
+% Likewise for the joint construction used by 'lite', false and by sampling:
+% build the combined ordering and conditioning sets once, then only refresh
+% the coordinates per draw.
+Ajoint = [];
+if opts.vecchia && ~p.nn_warped && (~p.lite || p.nsamp > 0)
+    ordn = randperm(nnew);
+    Ajoint = struct('ordn', ordn, ...
+                    'A', vdgp_create_approx([fit.x; xs_new(ordn, :)], p.m, 'none', true));
 end
 
 % The MCMC draws are independent given the fit, so this loop is the natural
@@ -92,14 +114,14 @@ end
 % p.cores = 0 MATLAB runs it serially; Octave ignores the worker count.
 if p.lite
     parfor (t = 1:T, p.cores)
-        [mt, st, ~, dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, true, ndraw_t(t));
+        [mt, st, ~, dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, true, ndraw_t(t), Ajoint);
         mu_t(:, t) = mt;
         s2_t(:, t) = st;
         Fc{t} = dr;
     end
 else
     parfor (t = 1:T, p.cores)
-        [mt, st, Sg, dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, false, ndraw_t(t));
+        [mt, st, Sg, dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, false, ndraw_t(t), Ajoint);
         mu_t(:, t) = mt;
         s2_t(:, t) = st;
         Sig = Sig + (Sg + mt * mt.') / T;
@@ -139,7 +161,7 @@ end
 end
 
 % -------------------------------------------------------------------------
-function [mu, s2, Sg, Dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, lite, ndraw)
+function [mu, s2, Sg, Dr] = local_one_draw(fit, xs_new, t, opts, p, NNx, lite, ndraw, Ajoint)
 % Propagate one posterior draw of the latent layers forward, condition the
 % outer layer on it, and optionally take NDRAW joint sample paths.
 Sg = [];
@@ -148,7 +170,7 @@ nnew = size(xs_new, 1);
 
 % latent layers propagated by their kriging means (as deepgp does); this is
 % what the reported mean and variance are always based on
-[Xin, Xout, NNo] = local_forward(fit, xs_new, t, opts, p, NNx, false);
+[Xin, Xout, NNo] = local_forward(fit, xs_new, t, opts, p, NNx, false, Ajoint);
 
 want_here = (ndraw > 0) && ~p.sample_latent;
 
@@ -158,13 +180,13 @@ if lite
     mu = o.mean; s2 = o.s2;
     if want_here
         os = vdgp_krig(fit.y, Xin, Xout, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
-                       opts, 'sample', p.m, [], ndraw);
+                       opts, 'sample', p.m, [], ndraw, Ajoint);
         Dr = os.draws;
     end
 else
     ns = 0; if want_here, ns = ndraw; end
     o = vdgp_krig(fit.y, Xin, Xout, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
-                  opts, 'joint', p.m, [], ns);
+                  opts, 'joint', p.m, [], ns, Ajoint);
     mu = o.mean; s2 = o.s2; Sg = o.Sigma;
     if want_here, Dr = o.draws; end
 end
@@ -174,20 +196,31 @@ end
 if (ndraw > 0) && p.sample_latent
     Dr = zeros(nnew, ndraw);
     for s = 1:ndraw
-        [Xin2, Xout2] = local_forward(fit, xs_new, t, opts, p, NNx, true);
+        [Xin2, Xout2] = local_forward(fit, xs_new, t, opts, p, NNx, true, Ajoint);
         os = vdgp_krig(fit.y, Xin2, Xout2, fit.theta_y(t), fit.g(t), fit.tau2(t), ...
-                       opts, 'sample', p.m, [], 1);
+                       opts, 'sample', p.m, [], 1, Ajoint);
         Dr(:, s) = os.draws;
     end
 end
 end
 
 % -------------------------------------------------------------------------
-function [Xin, Xout, NNo] = local_forward(fit, xs_new, t, opts, p, NNx, draw)
+function [Xin, Xout, NNo] = local_forward(fit, xs_new, t, opts, p, NNx, draw, Ajoint)
 % Push the test locations through the latent layers of MCMC draw t.  DRAW
 % false uses each layer's kriging mean; DRAW true takes a joint draw from each
 % layer's own predictive distribution.
 nnew = size(xs_new, 1);
+
+% Conditioning sets for the test points.  Row i of NNx indexes the training
+% rows nearest to test point i in x space, and the latent layers are just
+% re-coordinatisations of those same training rows, so NNx is a valid (and
+% fixed) conditioning set at every layer.  Re-deriving it in warped space for
+% each MCMC draw is what 'nn_warped' asks for, and it costs about 20x more.
+if p.nn_warped
+    NNlat = [];
+else
+    NNlat = NNx;
+end
 
 switch fit.layers
     case 1
@@ -197,33 +230,33 @@ switch fit.layers
         wn = zeros(nnew, size(wt, 2));
         for k = 1:size(wt, 2)
             wn(:, k) = local_layer(wt(:, k), fit.x, xs_new, fit.theta_w(t, k), ...
-                                   NNx, opts, p, draw);
+                                   NNx, opts, p, draw, Ajoint);
         end
-        Xin = wt; Xout = wn; NNo = [];
+        Xin = wt; Xout = wn; NNo = NNlat;
     case 3
         zt = fit.z(:, :, t);
         wt = fit.w(:, :, t);
         zn = zeros(nnew, size(zt, 2));
         for k = 1:size(zt, 2)
             zn(:, k) = local_layer(zt(:, k), fit.x, xs_new, fit.theta_z(t, k), ...
-                                   NNx, opts, p, draw);
+                                   NNx, opts, p, draw, Ajoint);
         end
         wn = zeros(nnew, size(wt, 2));
         for k = 1:size(wt, 2)
             wn(:, k) = local_layer(wt(:, k), zt, zn, fit.theta_w(t, k), ...
-                                   [], opts, p, draw);
+                                   NNlat, opts, p, draw, Ajoint);
         end
-        Xin = wt; Xout = wn; NNo = [];
+        Xin = wt; Xout = wn; NNo = NNlat;
     otherwise
         error('dgp_predict:layers', 'Unsupported number of layers.');
 end
 end
 
 % -------------------------------------------------------------------------
-function vals = local_layer(yy, Xtr, Xte, th, NNuse, opts, p, draw)
+function vals = local_layer(yy, Xtr, Xte, th, NNuse, opts, p, draw, Ajoint)
 % One hidden node pushed forward: kriging mean, or a joint draw.
 if draw
-    o = vdgp_krig(yy, Xtr, Xte, th, opts.eps, 1, opts, 'sample', p.m, NNuse, 1);
+    o = vdgp_krig(yy, Xtr, Xte, th, opts.eps, 1, opts, 'sample', p.m, NNuse, 1, Ajoint);
     vals = o.draws;
 else
     o = vdgp_krig(yy, Xtr, Xte, th, opts.eps, 1, opts, 'mean', p.m, NNuse);

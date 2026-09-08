@@ -51,8 +51,14 @@ if isempty(opts.ord_init)
 else
     x_approx = vdgp_create_approx(xs, opts.m, opts.ord_init, opts.vecchia);
 end
-% the w layer reuses the SAME ordering, as in deepgp
-w_approx = vdgp_create_approx(w, opts.m, x_approx.ord, opts.vecchia);
+% The w layer reuses the SAME ordering, as in deepgp.  When w starts at the
+% identity the conditioning sets are identical to x's, so the (O(n log n) but
+% not free) neighbour search is not repeated.
+if isequal(w, xs)
+    w_approx = x_approx;
+else
+    w_approx = vdgp_create_approx(w, opts.m, x_approx.ord, opts.vecchia);
+end
 
 nmcmc = opts.nmcmc;
 theta_y = zeros(nmcmc, 1);

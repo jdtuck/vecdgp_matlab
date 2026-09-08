@@ -32,8 +32,19 @@ if isempty(opts.ord_init)
 else
     x_approx = vdgp_create_approx(xs, opts.m, opts.ord_init, opts.vecchia);
 end
-z_approx = vdgp_create_approx(z, opts.m, x_approx.ord, opts.vecchia);
-w_approx = vdgp_create_approx(w, opts.m, x_approx.ord, opts.vecchia);
+% reuse x's conditioning sets for any layer that starts at the identity
+if isequal(z, xs)
+    z_approx = x_approx;
+else
+    z_approx = vdgp_create_approx(z, opts.m, x_approx.ord, opts.vecchia);
+end
+if isequal(w, z)
+    w_approx = z_approx;
+elseif isequal(w, xs)
+    w_approx = x_approx;
+else
+    w_approx = vdgp_create_approx(w, opts.m, x_approx.ord, opts.vecchia);
+end
 
 nmcmc = opts.nmcmc;
 theta_y = zeros(nmcmc, 1);

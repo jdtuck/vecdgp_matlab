@@ -26,8 +26,14 @@ for a = 1:chunk:nq
     Xb = Xq(a:b, :);
     D2 = sum(Xb.^2, 2) + sref - 2 * (Xb * Xref.');
     D2 = max(D2, 0);
-    [sd, si] = sort(D2, 2);
-    idx(a:b, :)  = si(:, 1:k);
-    dist(a:b, :) = sqrt(sd(:, 1:k));
+    if exist('mink', 'builtin') == 5 || exist('mink', 'file') == 2
+        % partial selection: much cheaper than a full sort when k << nr
+        [sd, si] = mink(D2, k, 2);
+    else
+        [sd, si] = sort(D2, 2);
+        sd = sd(:, 1:k);  si = si(:, 1:k);
+    end
+    idx(a:b, :)  = si;
+    dist(a:b, :) = sqrt(sd);
 end
 end

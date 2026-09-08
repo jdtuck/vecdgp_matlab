@@ -120,11 +120,19 @@ inverse factor" — `L' \ e_{m+1}` — see `vdgp_batch_last_row_inv.m`.
 The batched-array build is the fallback. If you have a C compiler, run
 
 ```matlab
-vdgp_build_mex          % compiles mex/vdgp_U_entries_mex.c, OpenMP if available
+vdgp_build_mex          % compiles the C kernels, with OpenMP if available
 ```
 
-once and `vdgp_U_entries` picks it up automatically — nothing else changes,
-and the pure-MATLAB path stays available if the MEX is absent.
+once. Three kernels are built — `vdgp_logl_mex` (the likelihood, which is
+what a Gibbs sweep spends nearly all its time in), `vdgp_U_entries_mex` (the
+`U` factor, for prior draws and joint prediction) and `vdgp_krig_mex`
+(pointwise prediction). They are picked up automatically; the pure-MATLAB
+paths stay available if the MEX files are absent.
+
+`vdgp_logl_mex` also skips materialising `U` at all: a Gibbs sweep needs only
+`||U'y||²` and `log|Q|` from it, so returning two scalars avoids allocating
+the n·(m+1) triplets — about 4 MB per call at n = 6000, m = 25 — on every one
+of the ~26 likelihood evaluations in a sweep.
 
 The flop count is identical; what changes is memory traffic. The batched
 version sweeps a k×k×n array (540 MB at n = 10⁵, m = 25) once per column of
@@ -148,10 +156,8 @@ End-to-end, seconds per Gibbs sweep of `fit_two_layer` (setup excluded):
 | 2 000 | 2.53 | 0.197 | 12.8× |
 | 5 000 | 10.05 | 0.645 | 15.6× |
 
-The sweep speed-up tracks the kernel speed-up because a sweep is ~30 `U`
-builds and essentially nothing else: with the MEX active, `vdgp_logl` spends
-96% of its time inside `vdgp_U_entries`, and the sparse assembly, `accumarray`
-and triangular solves are a few percent.
+The sweep speed-up tracks the kernel speed-up because a sweep is ~26
+likelihood evaluations and essentially nothing else.
 
 Two caveats on those numbers. They are Octave, whose array operations are
 slower than MATLAB's, so the MATLAB baseline is faster and the ratio there
@@ -159,8 +165,47 @@ will be smaller — expect mid single digits to ~10× single-threaded rather
 than 15×. And 2 cores only buys 1.5× from OpenMP here; a real multi-core
 machine will do better on the threaded column.
 
-`test_vdgp` passes 13/13 with the MEX active, with `U` matching the
-pure-MATLAB result to ~1e-9 relative.
+`test_vdgp` passes 16/16 with the MEX files active. `U` matches the
+pure-MATLAB result to ~1e-9 relative and the kriging MEX matches the batched
+path to 6e-13 across all four kernels and both isotropic and ARD lengthscales.
+
+### If it feels slow
+
+Run the diagnostic first — it says which fast paths are live and projects the
+cost of a full run:
+
+```matlab
+vdgp_profile(6000, 2, 25, 2)     % n, d, m, hidden width
+```
+
+Levers, in order of effect:
+
+1. **`vdgp_build_mex`.** Three C kernels — the likelihood, the `U` factor and
+   the prediction kriging. Roughly 10× on everything, and the profiler says
+   `NO` in bold if they are missing.
+2. **Threads.** The kernels are OpenMP-parallel over observations; set
+   `OMP_NUM_THREADS` before starting MATLAB.
+3. **`m`.** Cost grows like `m³`. Measured at n = 6000 on 2 cores: 0.76 s per
+   Gibbs sweep at `m = 25`, 0.44 s at `m = 15`, 0.37 s at `m = 10`. `m = 15`
+   is rarely distinguishable in accuracy.
+4. **Prediction.** `dgp_predict(..., 'cores', N)` parallelises over MCMC
+   draws, and `dgp_trim(fit, burn, thin)` with `thin > 1` cuts the draw count
+   directly.
+
+What the sweep is made of, and what cannot be optimised away: a sweep is
+`2 + 2D` likelihood evaluations for the hyperparameters plus the elliptical
+slice sampler, which needs of order 10 evaluations per hidden node once `n`
+reaches the thousands. That is inherent to ESS on a sharply-peaked likelihood
+and deepgp behaves the same way; at n = 6000 with `m = 25` and `D = 2` it puts
+a 10,000-iteration fit at about 100 minutes on 2 cores, proportionally less on
+more.
+
+Prediction, by contrast, used to dominate and no longer does. The neighbour
+search for the test points is now done once in x space rather than per MCMC
+draw (see `'nn_warped'`), and the joint construction used by `'lite', false`
+and by sampling reuses one ordering across draws. Together with the kriging
+MEX that took prediction at n = 6000 with 1000 test points and 2500 retained
+draws from roughly 23 minutes to under 1.
 
 ### Ordering and conditioning sets
 
@@ -325,8 +370,11 @@ mean ± 2 sd band summarises that but cannot display it.
 ```
 vdgp_setup.m               add the package to the path
 vdgp_options.m             all options / priors / proposal settings
-vdgp_build_mex.m           compile the optional MEX acceleration
-mex/vdgp_U_entries_mex.c   OpenMP C kernel for the U factor (optional)
+vdgp_profile.m             where the time goes; run this if it feels slow
+vdgp_build_mex.m           compile the optional MEX accelerations
+mex/vdgp_logl_mex.c        OpenMP C kernel: the likelihood (the hot path)
+mex/vdgp_U_entries_mex.c   OpenMP C kernel: the U factor
+mex/vdgp_krig_mex.c        OpenMP C kernel: pointwise prediction
 
 fit_one_layer.m            MCMC for a shallow GP
 fit_two_layer.m            MCMC for a two-layer DGP
@@ -375,9 +423,9 @@ Base MATLAB is enough. Optional:
 * **Parallel Computing Toolbox** — `dgp_predict` parallelises over MCMC draws;
   pass `'cores', N` (or set `opts.cores`) to request `N` workers. `0` runs
   serially.
-* **A C compiler** — `vdgp_build_mex` compiles the `U`-factor kernel, which is
-  where essentially all the MCMC time goes. Worth doing for anything past a
-  few thousand points; see *Optional MEX acceleration* above.
+* **A C compiler** — `vdgp_build_mex` compiles the three kernels that account
+  for essentially all the MCMC and prediction time. Worth doing for anything
+  past a few thousand points; see *Optional MEX acceleration* above.
 
 Note that with the MEX active the one-off nearest-neighbour search
 (`vdgp_ordered_nn`, ~2 s at n = 5000 under Octave's brute-force fallback)

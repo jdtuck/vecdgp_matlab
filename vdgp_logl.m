@@ -21,6 +21,11 @@ function out = vdgp_logl(y, A, theta, g, v, cov_type, outer)
 %
 %   OUT is a struct with fields .ll, .tau2, .quad, .logdet.
 
+persistent HAVE_LOGL_MEX
+if isempty(HAVE_LOGL_MEX)
+    HAVE_LOGL_MEX = (exist('vdgp_logl_mex', 'file') == 3);
+end
+
 if nargin < 7 || isempty(outer),    outer = true;        end
 if nargin < 6 || isempty(cov_type), cov_type = 'matern'; end
 if nargin < 5 || isempty(v),        v = 2.5;             end
@@ -29,12 +34,24 @@ n  = numel(y);
 yo = y(A.ord);
 yo = yo(:);
 
-E = vdgp_U_entries(A, theta, g, v, cov_type);
-
-% (U' * yo)_j = sum_i U(i,j) yo(i)
-Uty  = accumarray(E.J, E.V .* yo(E.I), [n, 1]);
-quad = sum(Uty.^2);
-logdet = 2 * sum(log(E.diagU));
+if HAVE_LOGL_MEX && A.vecchia
+    % The whole likelihood in one call: U is never materialised, so nothing
+    % of size n*(m+1) is allocated or returned.
+    if isscalar(g), gv = repmat(g, n, 1); else, gv = g(:); end
+    if isscalar(theta)
+        th = repmat(theta, 1, A.d);
+    else
+        th = reshape(theta, 1, []);
+    end
+    if strcmpi(cov_type, 'exp2'), vc = 999; else, vc = v; end
+    [quad, logdet] = vdgp_logl_mex(A.X_ord, A.NNarray, gv, th, vc, yo);
+else
+    E = vdgp_U_entries(A, theta, g, v, cov_type);
+    % (U' * yo)_j = sum_i U(i,j) yo(i)
+    Uty  = accumarray(E.J, E.V .* yo(E.I), [n, 1]);
+    quad = sum(Uty.^2);
+    logdet = 2 * sum(log(E.diagU));
+end
 
 if outer
     tau2 = quad / n;
