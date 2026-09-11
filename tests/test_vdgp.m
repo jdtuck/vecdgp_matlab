@@ -213,6 +213,31 @@ res(end+1) = report('one-at-a-time equals the block call', ...
                     max(abs(mu1 - muP)) < 1e-12, ...
                     sprintf('max diff %.2e', max(abs(mu1 - muP))));
 
+% -- 13. sampling the mixture one draw at a time --------------------------
+% vdgp_draw_pt picks an MCMC iteration uniformly and draws N(mu_t, s2_t) for
+% that iteration only. Pooling many such draws must reproduce the full
+% mixture mean and variance that vdgp_predict_pt reports.
+x1 = xte(40);
+[muM, s2M] = vdgp_predict_pt(Pp, x1);
+ND = 120000;
+Fd = zeros(ND, 1);
+for bi = 1:120
+    Fd((bi-1)*1000 + (1:1000)) = vdgp_draw_pt(Pp, x1, 'nsamp', 1000);
+end
+e1 = abs(mean(Fd) - muM) / sqrt(s2M);
+e2 = abs(var(Fd) - s2M) / s2M;
+res(end+1) = report('draws reproduce the predictive mixture', ...
+                    e1 < 0.05 && e2 < 0.05, ...
+                    sprintf('mean %.3f sd, var %.3f rel', e1, e2));
+
+% a fixed MCMC index must give a reproducible mu_t (the emulator realisation
+% is then held constant, as the modularised calibration approach needs)
+[~, i1] = vdgp_draw_pt(Pp, x1, 'idx', 3);
+[~, i2] = vdgp_draw_pt(Pp, x1, 'idx', 3);
+res(end+1) = report('fixed draw index is reproducible', ...
+                    abs(i1.mu_t - i2.mu_t) < 1e-14 && i1.idx == 3, ...
+                    sprintf('mu_t %.8f', i1.mu_t));
+
 np = sum(res);
 nf = numel(res) - np;
 fprintf('\n%d passed, %d failed\n\n', np, nf);

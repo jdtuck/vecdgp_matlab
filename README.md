@@ -234,6 +234,53 @@ rather than the whole-design neighbour search (which is what costs seconds and
 is pointless for one point), and all retained draws are evaluated in one
 batched Cholesky instead of one call per draw.
 
+### Propagating emulator uncertainty
+
+If the calibration likelihood needs an emulator *realisation* rather than a
+mean and a variance, use `vdgp_draw_pt`:
+
+```matlab
+P = vdgp_predictor(fit);            % once, outside the loop
+
+for k = 1:n_calibration_steps
+    f = vdgp_draw_pt(P, x_proposed);     % one draw from the posterior predictive
+    ...
+end
+```
+
+This is the cheapest call in the package, and deliberately so. The posterior
+predictive is the equal-weight mixture `(1/T) Σ_t N(mu_t, s2_t)` over retained
+draws, so a realisation is: pick `t` uniformly, then draw `N(mu_t, s2_t)`.
+Only the selected `t` has to be evaluated. `vdgp_predict_pt` evaluates all `T`
+because it must report the mixture's mean and variance; sampling does not,
+which makes `vdgp_draw_pt` roughly `T` times cheaper and, usefully, flat in
+`T`. Measured at n = 3000:
+
+| T | `vdgp_draw_pt` | `vdgp_predict_pt` | speed-up |
+|---|---|---|---|
+| 50 | 0.0088 s | 0.015 s | 2x |
+| 400 | 0.0091 s | 0.058 s | 6x |
+| 1600 | 0.0093 s | 0.25 s | 27x |
+
+It is exact, not an approximation: `test_vdgp` pools 120,000 draws and checks
+they reproduce the mixture mean and variance reported by `vdgp_predict_pt`.
+
+**Which `t`, and how often.** Redrawing `t` at every calibration step gives a
+*noisy likelihood*: the chain targets the calibration posterior only
+approximately, because the emulator realisation moves underneath it. The
+alternatives are to hold one realisation fixed for a whole chain
+(`vdgp_draw_pt(P, x, 'idx', t0)`) and pool several such chains — the
+modularised / multiple-imputation approach — or to average the likelihood
+over `K` draws per step (`'nsamp', K`). All three are supported; which is
+appropriate is a modelling decision, not a software one.
+
+**One caveat for more than one point.** Draws at several points share the
+selected MCMC iteration but are otherwise drawn from their own marginals, so
+they do not carry the emulator's correlation across those points. If the
+likelihood compares several inputs at once and they are close relative to the
+lengthscale, use `dgp_predict(..., 'lite', false, 'nsamp', K)`, which produces
+properly correlated joint draws.
+
 Two options trade accuracy for speed, and `demos/demo_scaling` measures both
 rather than asserting them. Measured at n = 2000, m = 25, 200 retained draws,
 against the full-`m`, full-`T` answer:
@@ -429,6 +476,7 @@ dgp_continue.m             extend a chain, optionally re-approximating
 dgp_predict.m              posterior predictive (parallel over draws)
 vdgp_predictor.m           pack a fit for repeated few-point prediction
 vdgp_predict_pt.m          calibration-path prediction, batched over draws
+vdgp_draw_pt.m             one draw from the posterior predictive (calibration)
 
 vdgp_create_approx.m       ordering + conditioning sets
 vdgp_update_approx.m       refresh latent coordinates (O(n))
