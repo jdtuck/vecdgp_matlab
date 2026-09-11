@@ -31,7 +31,9 @@ classdef vdgp_model
                 nSamps = obj.model.nmcmc;
             else
                 idxSamples = mod(idxSamples, obj.model.nmcmc);
+                
                 nSamps = length(idxSamples);
+                idxSamples = 1:nSamps;
             end
 
             out = vdgp_draw_pt(obj.P, x_new, 'nsamp', nSamps);
