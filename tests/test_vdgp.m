@@ -191,6 +191,28 @@ okit = numel(ps.f_iter) == 6000 && all(ps.f_iter >= 1) && ...
 res(end+1) = report('sample paths are spread over all retained draws', okit, ...
                     sprintf('%d iterations used', numel(unique(ps.f_iter))));
 
+% -- 12. the calibration fast path equals dgp_predict ---------------------
+% vdgp_predict_pt reorganises the same Vecchia predictor (loop over the few
+% test points, batch over MCMC draws); it must agree to round-off.
+Pp = vdgp_predictor(fit);
+[muP, s2P] = vdgp_predict_pt(Pp, xte(1:7:end));
+pRef = dgp_predict(fit, xte(1:7:end));
+e1 = max(abs(muP - pRef.mean));
+e2 = max(abs(s2P - pRef.s2));
+res(end+1) = report('calibration path matches dgp_predict', ...
+                    e1 < 1e-9 && e2 < 1e-9, ...
+                    sprintf('mean %.2e, s2 %.2e', e1, e2));
+
+% one point at a time must equal the same points passed as a block
+mu1 = zeros(numel(xte(1:7:end)), 1);
+xs1 = xte(1:7:end);
+for i = 1:numel(xs1)
+    mu1(i) = vdgp_predict_pt(Pp, xs1(i));
+end
+res(end+1) = report('one-at-a-time equals the block call', ...
+                    max(abs(mu1 - muP)) < 1e-12, ...
+                    sprintf('max diff %.2e', max(abs(mu1 - muP))));
+
 np = sum(res);
 nf = numel(res) - np;
 fprintf('\n%d passed, %d failed\n\n', np, nf);

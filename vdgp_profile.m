@@ -70,11 +70,13 @@ fprintf('\n  Levers, in order of effect:\n');
 fprintf('   1. vdgp_build_mex (if any line above says NO)\n');
 fprintf('   2. threads: the C kernels are OpenMP-parallel over observations;\n');
 fprintf('      set OMP_NUM_THREADS before starting MATLAB\n');
-fprintf('   3. m: cost grows like m^3 -- m = 15 is ~4x cheaper than m = 25 and\n');
-fprintf('      usually indistinguishable in accuracy\n');
-fprintf('   4. prediction: dgp_predict(..., ''cores'', N) parallelises over MCMC\n');
-fprintf('      draws, and dgp_trim(fit, burn, thin) with thin > 1 cuts the draw\n');
-fprintf('      count directly\n\n');
+fprintf('   3. m: sampler cost grows with m, though more slowly than m^3 --\n');
+fprintf('      measured ~2.9x from m = 15 to m = 25 at n = 2000. Run\n');
+fprintf('      demos/demo_scaling for the cost AND the accuracy it costs you.\n');
+fprintf('   4. prediction: for one point at a time (calibration), use\n');
+fprintf('      vdgp_predictor + vdgp_predict_pt, and thin the retained draws --\n');
+fprintf('      thinning is close to free. dgp_predict(..., ''cores'', N)\n');
+fprintf('      parallelises the many-test-point case over MCMC draws.\n\n');
 
 info = struct('have', have, 't_setup', t_nn, 't_logl', t_ll, 't_randmvn', t_rm, ...
               't_krig', t_kr, 't_sweep', t_sweep, 'n', n, 'd', d, 'm', m, 'D', D);

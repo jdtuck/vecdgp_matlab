@@ -185,9 +185,10 @@ Levers, in order of effect:
    `NO` in bold if they are missing.
 2. **Threads.** The kernels are OpenMP-parallel over observations; set
    `OMP_NUM_THREADS` before starting MATLAB.
-3. **`m`.** Cost grows like `m³`. Measured at n = 6000 on 2 cores: 0.76 s per
-   Gibbs sweep at `m = 25`, 0.44 s at `m = 15`, 0.37 s at `m = 10`. `m = 15`
-   is rarely distinguishable in accuracy.
+3. **`m`.** Sampler cost grows with `m`, but more slowly than `m³` — there is
+   an O(n·m) component that dominates at small `m`. Measured at n = 2000:
+   0.21 s per sweep at `m = 25`, 0.073 s at `m = 15`, 0.052 s at `m = 10`.
+   Note this is a real accuracy trade, not a free one — see the table below.
 4. **Prediction.** `dgp_predict(..., 'cores', N)` parallelises over MCMC
    draws, and `dgp_trim(fit, burn, thin)` with `thin > 1` cuts the draw count
    directly.
@@ -206,6 +207,50 @@ draw (see `'nn_warped'`), and the joint construction used by `'lite', false`
 and by sampling reuses one ordering across draws. Together with the kriging
 MEX that took prediction at n = 6000 with 1000 test points and 2500 retained
 draws from roughly 23 minutes to under 1.
+
+### Prediction in a calibration loop
+
+`dgp_predict` is organised for many test points at once: it loops over MCMC
+draws and krigs all the test points inside each. A calibration MCMC inverts
+that — one proposed input, every retained draw — so the loop should be over
+the small dimension and the batch over the large one. Build the predictor once
+and call it per proposal:
+
+```matlab
+fit = dgp_trim(fit, burn, thin);
+P   = vdgp_predictor(fit);          % once, outside the loop
+
+for k = 1:n_calibration_steps
+    [mu, s2] = vdgp_predict_pt(P, x_proposed);
+    ...
+end
+```
+
+`vdgp_predict_pt` evaluates exactly the same Vecchia predictor as
+`dgp_predict` — `test_vdgp` checks they agree to ~1e-12, and that one point at
+a time equals the same points passed as a block. It is faster for two
+reasons: the conditioning set for a single point is found by one O(n·d) scan
+rather than the whole-design neighbour search (which is what costs seconds and
+is pointless for one point), and all retained draws are evaluated in one
+batched Cholesky instead of one call per draw.
+
+Two options trade accuracy for speed, and `demos/demo_scaling` measures both
+rather than asserting them. Measured at n = 2000, m = 25, 200 retained draws,
+against the full-`m`, full-`T` answer:
+
+| m | thin | s / call | RMSE | \|Δmean\| / sd |
+|---|---|---|---|---|
+| 25 | 1 | 0.029 | 0.0046 | 0 (reference) |
+| 25 | 20 | 0.0099 | 0.0046 | 0.009 |
+| 15 | 1 | 0.014 | 0.0055 | 0.21 |
+| 10 | 1 | 0.0083 | 0.0073 | 0.38 |
+| 5 | 1 | 0.0046 | 0.0112 | 0.65 |
+
+Read that as: **thinning the retained draws is close to free** — 3x cheaper
+with the predictive mean moving by 0.01 of a predictive standard deviation.
+**Shrinking `m` at prediction time is not** — `m = 15` moves the mean by a
+fifth of a standard deviation and degrades RMSE by 20%. Thin first; only drop
+`m` if you have measured that you can afford it on your own problem.
 
 ### Ordering and conditioning sets
 
@@ -382,6 +427,8 @@ fit_three_layer.m          MCMC for a three-layer DGP
 dgp_trim.m                 burn-in and thinning
 dgp_continue.m             extend a chain, optionally re-approximating
 dgp_predict.m              posterior predictive (parallel over draws)
+vdgp_predictor.m           pack a fit for repeated few-point prediction
+vdgp_predict_pt.m          calibration-path prediction, batched over draws
 
 vdgp_create_approx.m       ordering + conditioning sets
 vdgp_update_approx.m       refresh latent coordinates (O(n))
@@ -408,6 +455,8 @@ vdgp_lgamma.m, vdgp_crps.m, vdgp_band.m utilities
 
 demos/demo_1d.m            the deepgp 1-D example, 1/2/3 layers
 demos/demo_2d_scaling.m    cost and accuracy vs n, Vecchia vs exact
+demos/demo_scaling.m       full benchmark: cost vs n, vs m, prediction paths,
+                           and what the cheap speed-ups cost in accuracy
 tests/test_vdgp.m          verification suite
 ```
 
