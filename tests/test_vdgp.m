@@ -1,4 +1,3 @@
-function test_vdgp()
 %TEST_VDGP  Verification suite for the Vecchia deep GP package.
 %
 %   Run with   test_vdgp
@@ -244,7 +243,7 @@ fprintf('\n%d passed, %d failed\n\n', np, nf);
 if nf > 0
     error('test_vdgp:fail', '%d checks failed.', nf);
 end
-end
+
 
 % -------------------------------------------------------------------------
 function ok = report(name, ok, detail)

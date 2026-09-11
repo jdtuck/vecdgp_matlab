@@ -3,15 +3,20 @@ classdef vdgp_model
 
     properties
         model
+        P
         samples
     end
 
     methods
-        function obj = vdgp_model(model)
+        function obj = vdgp_model(fit)
             arguments
-                model
+                fit
             end
-            obj.model = model;
+            
+            obj.model = fit;
+            samples.tau2 = fit.tau2;
+            samples.g = fit.g;
+            obj.P = vdgp_predictor(fit);   
         end
 
         function pred = predict(obj, x_new, options)
@@ -19,15 +24,18 @@ classdef vdgp_model
                 obj
                 x_new
                 options.idxSamples = nan;
-                options.B = 500;
             end
             idxSamples = options.idxSamples;
             if isnan(idxSamples) 
-                idxSamples = 1:options.B;
+                idxSamples = 1:obj.model.nmcmc;
+                nSamps = obj.model.nmcmc;
+            else
+                idxSamples = mod(idxSamples, obj.model.nmcmc);
+                nSamps = length(idxSamples);
             end
 
-            out = dgp_predict(obj.model, x_new, 'nsamp', options.B);
-            pred = out.f(:, idxSamples)';
+            out = vdgp_draw_pt(obj.P, x_new, 'nsamp', nSamps);
+            pred = out(:, idxSamples)';
 
         end
     end
