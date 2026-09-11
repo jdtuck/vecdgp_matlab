@@ -274,6 +274,29 @@ modularised / multiple-imputation approach — or to average the likelihood
 over `K` draws per step (`'nsamp', K`). All three are supported; which is
 appropriate is a modelling decision, not a software one.
 
+**How this scales with the training size.** `vdgp_bench_samples` sweeps n and
+measures it. Because a draw is a fixed amount of O(m^3) linear algebra plus an
+O(n·d) scan to find the conditioning set, and the scan is the small term until
+n gets large, the per-call cost is close to flat in n. Measured, d = 2,
+m = 25, T = 200 retained draws, MEX active:
+
+| n | fit, s/sweep | `vdgp_draw_pt` s | scan share | held-out RMSE |
+|---|---|---|---|---|
+| 250 | 0.028 | 0.0068 | 1% | 0.021 |
+| 1 000 | 0.093 | 0.0070 | 1% | 0.0060 |
+| 4 000 | 0.372 | 0.0066 | 6% | 0.0047 |
+| 8 000 | 0.699 | 0.0058 | 15% | 0.0037 |
+
+So 10,000 calibration steps costs about a minute at n = 8 000, and roughly the
+same at n = 250 — while the emulator itself keeps getting better with n. The
+training size is paid for in the fit, which is linear in n, not in the
+calibration loop.
+
+The scan share is the column to watch: it is heading upward, and past roughly
+n = 50 000 it would dominate and the per-call cost would start tracking n. At
+that point a prebuilt neighbour-search structure in `vdgp_predictor` is the
+next thing worth adding — it is not worth it yet.
+
 **One caveat for more than one point.** Draws at several points share the
 selected MCMC iteration but are otherwise drawn from their own marginals, so
 they do not carry the emulator's correlation across those points. If the
@@ -477,6 +500,7 @@ dgp_predict.m              posterior predictive (parallel over draws)
 vdgp_predictor.m           pack a fit for repeated few-point prediction
 vdgp_predict_pt.m          calibration-path prediction, batched over draws
 vdgp_draw_pt.m             one draw from the posterior predictive (calibration)
+vdgp_bench_samples.m       benchmark: cost and accuracy vs training size n
 
 vdgp_create_approx.m       ordering + conditioning sets
 vdgp_update_approx.m       refresh latent coordinates (O(n))
