@@ -208,8 +208,12 @@ xs1 = xte(1:7:end);
 for i = 1:numel(xs1)
     mu1(i) = vdgp_predict_pt(Pp, xs1(i));
 end
+% Tolerance is numerical, not bitwise: vdgp_predict_pt auto-selects between
+% batching over draws and batching over points, so one point and a block of
+% points can take different (equivalent) orientations and reassociate the
+% same sums differently.
 res(end+1) = report('one-at-a-time equals the block call', ...
-                    max(abs(mu1 - muP)) < 1e-12, ...
+                    max(abs(mu1 - muP)) < 1e-8, ...
                     sprintf('max diff %.2e', max(abs(mu1 - muP))));
 
 % -- 13. sampling the mixture one draw at a time --------------------------
@@ -236,6 +240,39 @@ res(end+1) = report('draws reproduce the predictive mixture', ...
 res(end+1) = report('fixed draw index is reproducible', ...
                     abs(i1.mu_t - i2.mu_t) < 1e-14 && i1.idx == 3, ...
                     sprintf('mu_t %.8f', i1.mu_t));
+
+% -- 14. the two prediction orientations agree ----------------------------
+% Few points / many draws batches over draws; many points / few draws batches
+% over points. Same Vecchia predictor, same conditioning sets, so they must
+% agree -- and both must still agree with dgp_predict.
+Xblk = xte(5:9);
+pA = dgp_predict(fit, Xblk);
+[mD, sD] = vdgp_predict_pt(Pp, Xblk, 'path', 'draws');
+[mP, sPv] = vdgp_predict_pt(Pp, Xblk, 'path', 'points');
+e1 = max(abs(mD - mP));
+e2 = max(abs(sD - sPv));
+e3 = max(abs(pA.mean - mP));
+res(end+1) = report('predict_pt: draws path == points path', ...
+                    e1 < 1e-8 && e2 < 1e-8 && e3 < 1e-8, ...
+                    sprintf('mu %.2e, s2 %.2e, vs dgp_predict %.2e', e1, e2, e3));
+
+% the same for the draw path, at a fixed emulator index
+[~, iD] = vdgp_draw_pt(Pp, Xblk, 'idx', 4, 'path', 'draws');
+[~, iP] = vdgp_draw_pt(Pp, Xblk, 'idx', 4, 'path', 'points');
+e1 = max(abs(iD.mu_t - iP.mu_t));
+e2 = max(abs(iD.s2_t - iP.s2_t));
+res(end+1) = report('draw_pt: draws path == points path', ...
+                    e1 < 1e-8 && e2 < 1e-8, ...
+                    sprintf('mu_t %.2e, s2_t %.2e', e1, e2));
+
+% a block of points must match the same points asked for one at a time
+mu1 = zeros(numel(Xblk), 1);
+for i = 1:numel(Xblk)
+    mu1(i) = vdgp_predict_pt(Pp, Xblk(i));
+end
+res(end+1) = report('block of points == one at a time', ...
+                    max(abs(mu1 - mP)) < 1e-8, ...
+                    sprintf('max diff %.2e', max(abs(mu1 - mP))));
 
 np = sum(res);
 nf = numel(res) - np;

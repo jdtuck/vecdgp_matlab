@@ -297,6 +297,31 @@ n = 50 000 it would dominate and the per-call cost would start tracking n. At
 that point a prebuilt neighbour-search structure in `vdgp_predictor` is the
 next thing worth adding — it is not worth it yet.
 
+**One point or many: two orientations.** `vdgp_predict_pt` and
+`vdgp_draw_pt` both accept an n_new-by-d block, and both can compute it two
+ways:
+
+* *batch over draws, loop over points* — every retained draw evaluated in one
+  batched Cholesky. Best for very few points with a long retained chain.
+* *batch over points, loop over draws* — each draw becomes a single
+  `vdgp_krig` call over the whole block, which is the MEX-accelerated path.
+  Best for anything past a handful of points, and also for one point when
+  there are few draws.
+
+`'path'` selects: `'auto'` (default), `'points'`, `'draws'`. They evaluate the
+same Vecchia predictor with the same conditioning sets and agree to round-off
+— `test_vdgp` checks both, against each other and against `dgp_predict`.
+Measured at n = 1500, T = 125, one draw per call:
+
+| n_new | batch over draws | batch over points | speed-up |
+|---|---|---|---|
+| 1 | 0.0053 s | 0.0012 s | 4.6x |
+| 20 | 0.093 s | 0.0040 s | 23x |
+| 500 | 2.39 s | 0.086 s | 28x |
+| 2 000 | 9.19 s | 0.50 s | 18x |
+
+So passing a whole block is far better than looping over rows yourself.
+
 **One caveat for more than one point.** Draws at several points share the
 selected MCMC iteration but are otherwise drawn from their own marginals, so
 they do not carry the emulator's correlation across those points. If the
@@ -500,6 +525,7 @@ dgp_predict.m              posterior predictive (parallel over draws)
 vdgp_predictor.m           pack a fit for repeated few-point prediction
 vdgp_predict_pt.m          calibration-path prediction, batched over draws
 vdgp_draw_pt.m             one draw from the posterior predictive (calibration)
+vdgp_moments_draws.m       per-draw moments, batched over test points
 vdgp_bench_samples.m       benchmark: cost and accuracy vs training size n
 
 vdgp_create_approx.m       ordering + conditioning sets

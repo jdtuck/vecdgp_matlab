@@ -27,6 +27,13 @@ function [f, info] = vdgp_draw_pt(P, x_new, varargin)
 %              uniformly.  Pass a fixed index to hold the emulator realisation
 %              constant -- see the note on noisy likelihoods below.
 %     'm'      conditioning-set size for this call (default: the predictor's)
+%     'path'   which orientation to use (default 'auto'):
+%                'draws'  batch over MCMC draws, loop over points -- best for
+%                         a few points, which is the calibration pattern
+%                'points' batch over points, loop over draws -- best for many
+%                         points, where each draw is one MEX-accelerated
+%                         VDGP_KRIG call over the whole block
+%                'auto'   pick by size.  Both give the same answers.
 %
 %   WHICH t TO USE, AND WHEN.  Redrawing t at every calibration step gives a
 %   noisy likelihood: the chain then targets the calibration posterior only
@@ -51,7 +58,7 @@ function [f, info] = vdgp_draw_pt(P, x_new, varargin)
 %
 %   See also VDGP_PREDICTOR, VDGP_PREDICT_PT, DGP_PREDICT.
 
-o = struct('nsamp', 1, 'idx', [], 'm', []);
+o = struct('nsamp', 1, 'idx', [], 'm', [], 'path', 'auto');
 for i = 1:2:numel(varargin)
     if ~isfield(o, varargin{i})
         error('vdgp_draw_pt:opt', 'Unknown option "%s".', varargin{i});
@@ -71,6 +78,35 @@ else
         tsel = repmat(tsel, 1, K);
     end
     K = numel(tsel);
+end
+
+% ---- pick an orientation -------------------------------------------------
+% Cost is roughly n_new * c(K) one way and K * c(n_new) the other. Measured,
+% the point-batched path wins as soon as there are a few points, and also at
+% one point when K is small, because it routes through VDGP_KRIG's MEX
+% kernel while the draw-batched path is vectorised MATLAB. The draw-batched
+% path only pays off for very few points with many draws.
+nnew_in = size(x_new, 1);
+if isvector(x_new) && P.d > 1 && numel(x_new) == P.d, nnew_in = 1; end
+
+switch lower(o.path)
+    case 'auto',   use_points = (nnew_in >= 4) || (K <= 4);
+    case 'points', use_points = true;
+    case 'draws',  use_points = false;
+    otherwise
+        error('vdgp_draw_pt:path', 'path must be ''auto'', ''points'' or ''draws''.');
+end
+
+if use_points
+    Pm = P;
+    if ~isempty(o.m), Pm.m = min(o.m, P.n); end
+    xs = local_scale(Pm, x_new);
+    [mu_t, s2_t] = vdgp_moments_draws(Pm, xs, tsel);
+    f = mu_t + sqrt(max(s2_t, 0)) .* randn(size(mu_t));
+    if nargout > 1
+        info = struct('idx', tsel, 'mu_t', mu_t, 's2_t', s2_t, 'path', 'points');
+    end
+    return
 end
 
 % Restrict the predictor to just the selected draws, then reuse the ordinary
@@ -99,6 +135,20 @@ s2_t = out.s2_t;
 f    = mu_t + sqrt(max(s2_t, 0)) .* randn(size(mu_t));
 
 if nargout > 1
-    info = struct('idx', tsel, 'mu_t', mu_t, 's2_t', s2_t);
+    info = struct('idx', tsel, 'mu_t', mu_t, 's2_t', s2_t, 'path', 'draws');
+end
+end
+
+% -------------------------------------------------------------------------
+function xs = local_scale(P, x_new)
+if isvector(x_new) && P.d > 1 && numel(x_new) == P.d
+    x_new = x_new(:).';
+elseif isvector(x_new) && P.d == 1
+    x_new = x_new(:);
+end
+if P.scaling.scaled
+    xs = (x_new - P.scaling.xmin) ./ P.scaling.xrange;
+else
+    xs = x_new;
 end
 end

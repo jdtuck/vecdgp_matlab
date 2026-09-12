@@ -16,6 +16,10 @@ function [mu, s2, out] = vdgp_predict_pt(P, x_new, varargin)
 %                 predictor's.  Prediction cost grows like m^3, and a smaller
 %                 m at prediction time than at fit time is usually harmless --
 %                 demo_scaling quantifies the trade-off.
+%     'path'      which orientation to use: 'draws' (batch over MCMC draws,
+%                 loop over points -- best for few points and many draws),
+%                 'points' (batch over points, loop over draws -- best for
+%                 many points), or 'auto' (default).  Same answers either way.
 %     'thin'      use every k-th retained draw (default 1).  The posterior
 %                 predictive is a mixture over draws; its mean and variance
 %                 converge in T long before the chain does, so thinning here
@@ -41,7 +45,7 @@ function [mu, s2, out] = vdgp_predict_pt(P, x_new, varargin)
 %
 %   See also VDGP_PREDICTOR, DGP_PREDICT.
 
-o = struct('per_draw', false, 'm', [], 'thin', 1);
+o = struct('per_draw', false, 'm', [], 'thin', 1, 'path', 'auto');
 for i = 1:2:numel(varargin)
     if ~isfield(o, varargin{i})
         error('vdgp_predict_pt:opt', 'Unknown option "%s".', varargin{i});
@@ -71,6 +75,44 @@ else
     xs = x_new;
 end
 nnew = size(xs, 1);
+
+% ---- orientation --------------------------------------------------------
+switch lower(o.path)
+    case 'auto',   use_points = (nnew >= 4) || (P.T <= 4);
+    case 'points', use_points = true;
+    case 'draws',  use_points = false;
+    otherwise
+        error('vdgp_predict_pt:path', ...
+              'path must be ''auto'', ''points'' or ''draws''.');
+end
+
+if use_points
+    % Batch over test points, loop over draws, in blocks so that the
+    % n_new-by-T moment arrays stay bounded.
+    mu_all = zeros(nnew, 1);
+    ms_all = zeros(nnew, 1);
+    if o.per_draw
+        out.mu_t = zeros(nnew, P.T);
+        out.s2_t = zeros(nnew, P.T);
+    end
+    for a = 1:P.chunk:P.T
+        b  = min(P.T, a + P.chunk - 1);
+        tt = a:b;
+        [mt, st] = vdgp_moments_draws(P, xs, tt);     % original y scale
+        mu_all = mu_all + sum(mt, 2);
+        ms_all = ms_all + sum(st + mt.^2, 2);
+        if o.per_draw
+            out.mu_t(:, tt) = mt;
+            out.s2_t(:, tt) = st;
+        end
+    end
+    mu = mu_all / P.T;
+    s2 = max(ms_all / P.T - mu.^2, 0);
+    out.mean = mu;
+    out.s2   = s2;
+    out.sd   = sqrt(s2);
+    return
+end
 
 mu = zeros(nnew, 1);
 s2 = zeros(nnew, 1);
