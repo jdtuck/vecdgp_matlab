@@ -72,8 +72,10 @@ classdef vdgp_model
                 s.theta_z = fit.theta_z;
             end
             obj.samples = s;
+            samples.residSD = zeros(fit.nmcmc,1);
 
             obj.P = vdgp_predictor(fit);
+            
         end
 
         function pred = predict(obj, x_new, options)
