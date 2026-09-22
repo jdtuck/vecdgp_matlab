@@ -19,7 +19,7 @@ function [f, info] = vdgp_draw_pt(P, x_new, varargin)
 %   VDGP_PREDICT_PT evaluates every draw because it has to report the mixture
 %   mean and variance; sampling does not, which makes this roughly T times
 %   faster.  It is exact, not an approximation: see the mixture check in
-%   test_vdgp.
+%   the tests (EndToEndTest).
 %
 %   Options
 %     'nsamp'  number of draws (default 1)

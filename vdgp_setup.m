@@ -12,5 +12,5 @@ addpath(here);
 addpath(fullfile(here, 'demos'));
 addpath(fullfile(here, 'tests'));
 fprintf('vecchia_dgp added to the path (%s)\n', here);
-fprintf('Try:  test_vdgp   |   demo_1d   |   demo_2d_scaling\n');
+fprintf('Try:  run_tests   |   demo_1d   |   demo_2d_scaling\n');
 end

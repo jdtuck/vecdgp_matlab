@@ -21,7 +21,7 @@ function [mu_t, s2_t] = vdgp_moments_draws(P, xs, tsel)
 %       MEX-accelerated path.
 %
 %   Both evaluate the same Vecchia predictor with the same conditioning sets,
-%   so they agree to round-off; see the check in test_vdgp.
+%   so they agree to round-off; see the check in the tests (EndToEndTest).
 %
 %   See also VDGP_PREDICT_PT, VDGP_DRAW_PT, VDGP_KRIG.
 
